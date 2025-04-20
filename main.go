@@ -46,11 +46,34 @@ func parseBDF(filename string) (int, int, []*Glyph) {
 	var glyphs []*Glyph
 	var currentGlyph *Glyph
 	insideGlyph := false
+	insideBitmap := false
 	var bytesPerRow int
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
+
+		if insideGlyph && insideBitmap {
+			line = strings.TrimSpace(line)
+			if line == "ENDCHAR" {
+				currentGlyph.yOffsetTFT = -(currentGlyph.bbxY + currentGlyph.height)
+				glyphs = append(glyphs, currentGlyph)
+				insideGlyph = false
+				insideBitmap = false
+				continue
+			}
+
+			rowBytes, err := hex.DecodeString(line)
+			if err != nil {
+				log.Fatalf("Hex decode error: %v", err)
+			}
+			if len(rowBytes) != bytesPerRow {
+				log.Fatalf("Expected %d bytes, got %d", bytesPerRow, len(rowBytes))
+			}
+			currentGlyph.bitmap = append(currentGlyph.bitmap, rowBytes...)
+			continue
+		}
+
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
 			continue
@@ -89,27 +112,7 @@ func parseBDF(filename string) (int, int, []*Glyph) {
 		case "BITMAP":
 			if insideGlyph {
 				currentGlyph.bitmap = []byte{}
-				for scanner.Scan() {
-					line := scanner.Text()
-					if line == "ENDCHAR" {
-						break
-					}
-					line = strings.TrimSpace(line)
-					rowBytes, err := hex.DecodeString(line)
-					if err != nil {
-						log.Fatalf("Hex decode error: %v", err)
-					}
-					if len(rowBytes) != bytesPerRow {
-						log.Fatalf("Expected %d bytes, got %d", bytesPerRow, len(rowBytes))
-					}
-					currentGlyph.bitmap = append(currentGlyph.bitmap, rowBytes...)
-				}
-			}
-		case "ENDCHAR":
-			if insideGlyph {
-				currentGlyph.yOffsetTFT = -(currentGlyph.bbxY + currentGlyph.height)
-				glyphs = append(glyphs, currentGlyph)
-				insideGlyph = false
+				insideBitmap = true
 			}
 		}
 	}
@@ -141,32 +144,31 @@ func generateHeader(filename string, ascent, descent int, glyphs []*Glyph) {
 		offset += len(g.bitmap)
 	}
 
-	fmt.Fprintf(outFile, "#pragma once\n\n#include <stdint.h>\n\n")
-	fmt.Fprintf(outFile, "typedef struct {\n")
-	fmt.Fprintf(outFile, "  uint16_t bitmapOffset;\n")
-	fmt.Fprintf(outFile, "  uint8_t  width;\n")
-	fmt.Fprintf(outFile, "  uint8_t  height;\n")
-	fmt.Fprintf(outFile, "  uint8_t  xAdvance;\n")
-	fmt.Fprintf(outFile, "  int8_t   xOffset;\n")
-	fmt.Fprintf(outFile, "  int8_t   yOffset;\n} GFXglyph;\n\n")
+	fmt.Fprintf(outFile, "// typedef struct {\n")
+	fmt.Fprintf(outFile, "//   uint16_t bitmapOffset;\n")
+	fmt.Fprintf(outFile, "//   uint8_t  width;\n")
+	fmt.Fprintf(outFile, "//   uint8_t  height;\n")
+	fmt.Fprintf(outFile, "//   uint8_t  xAdvance;\n")
+	fmt.Fprintf(outFile, "//   int8_t   xOffset;\n")
+	fmt.Fprintf(outFile, "//   int8_t   yOffset;\n} GFXglyph;\n\n")
 
-	fmt.Fprintf(outFile, "typedef struct {\n")
-	fmt.Fprintf(outFile, "  uint8_t  *bitmap;\n")
-	fmt.Fprintf(outFile, "  GFXglyph *glyph;\n")
-	fmt.Fprintf(outFile, "  uint16_t  first;\n")
-	fmt.Fprintf(outFile, "  uint16_t  last;\n")
-	fmt.Fprintf(outFile, "  uint8_t   yAdvance;\n} GFXfont;\n\n")
+	fmt.Fprintf(outFile, "// typedef struct {\n")
+	fmt.Fprintf(outFile, "//   uint8_t  *bitmap;\n")
+	fmt.Fprintf(outFile, "//   GFXglyph *glyph;\n")
+	fmt.Fprintf(outFile, "//   uint16_t  first;\n")
+	fmt.Fprintf(outFile, "//   uint16_t  last;\n")
+	fmt.Fprintf(outFile, "//   uint8_t   yAdvance;\n} GFXfont;\n\n")
 
-	fmt.Fprintf(outFile, "static const uint8_t fontBitmaps[] = {\n  ")
+	fmt.Fprintf(outFile, "const uint8_t FontBitmaps[] PROGMEM = {\n  ")
 	for i, b := range bitmapData {
-		if i > 0 && i%12 == 0 {
+		if i > 0 && i%(ascent+descent) == 0 {
 			fmt.Fprint(outFile, "\n  ")
 		}
 		fmt.Fprintf(outFile, "0x%02X, ", b)
 	}
 	fmt.Fprintf(outFile, "\n};\n\n")
 
-	fmt.Fprintf(outFile, "static const GFXglyph fontGlyphs[] = {\n")
+	fmt.Fprintf(outFile, "const GFXglyph FontGlyphs[] PROGMEM = {\n")
 	for i, g := range glyphs {
 		fmt.Fprintf(outFile, "  { %5d, %2d, %2d, %2d, %3d, %3d }, // 0x%04X\n",
 			offsets[i], g.width, g.height, g.xAdvance, g.xOffset, g.yOffsetTFT, g.code)
@@ -174,8 +176,8 @@ func generateHeader(filename string, ascent, descent int, glyphs []*Glyph) {
 	fmt.Fprint(outFile, "};\n\n")
 
 	first, last := glyphs[0].code, glyphs[len(glyphs)-1].code
-	fmt.Fprintf(outFile, "const GFXfont font = {\n")
-	fmt.Fprintf(outFile, "  (uint8_t*)fontBitmaps,\n")
-	fmt.Fprintf(outFile, "  (GFXglyph*)fontGlyphs,\n")
-	fmt.Fprintf(outFile, "  %d, %d, %d\n};\n", first, last, ascent+descent)
+	fmt.Fprintf(outFile, "const GFXfont Font PROGMEM = {\n")
+	fmt.Fprintf(outFile, "  (uint8_t*)FontBitmaps,\n")
+	fmt.Fprintf(outFile, "  (GFXglyph*)FontGlyphs,\n")
+	fmt.Fprintf(outFile, "  0x%x, 0x%x, %d\n};\n", first, last, ascent+descent)
 }
